@@ -10,6 +10,9 @@ using namespace Midi;
 
 BEGIN_BLEMIDI_NAMESPACE
 
+static BLEUUID serviceUUID("03B80E5A-EDE8-4B33-A751-6CE34EC4C700");
+static BLEUUID    charUUID("7772E5DB-3868-4112-A1A9-F2669D106BF3");
+
 class BleMidiInterface : public AbstractMidiInterface
 {
 protected:
@@ -21,12 +24,14 @@ protected:
     bool _connected;
     
     uint8_t _midiPacket[5];
-    
+
 public:
     // callbacks
     void(*_connectedCallback)() = NULL;
     void(*_disconnectedCallback)() = NULL;
-    
+    void(*_scanResultsCallback)() = NULL;
+  //  void (*_notifyCall)(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify);
+
 protected:
     inline static void getMidiTimestamp (uint8_t *header, uint8_t *timestamp)
     {
@@ -126,9 +131,22 @@ public:
     {
     }
     
+    static BleMidiInterface *_instance;
+
+    static BleMidiInterface* singleton() {
+        if (_instance == 0) {
+            _instance = new BleMidiInterface();
+        }
+        return _instance;
+    }
+    
     // TODO why must these functions be inline??
     
     inline bool begin(const char* deviceName);
+    
+    inline bool beginClient(const char* deviceName, bool startScan);
+
+    inline bool connectClient(BLEAddress pAddress);
     
     inline void read()
     {
@@ -145,6 +163,12 @@ public:
         _connected = false;
         _disconnectedCallback = fptr;
     }
+    
+    void onScanDeviceDiscovered(void(*fptr)()) {
+        _scanResultsCallback = fptr;
+    };
+  
+  //  inline void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify);
     
 };
 
@@ -184,6 +208,85 @@ protected:
     }
 };
 
+//class RemoteCharacteristicCallback {
+//public:
+//    static BleMidiInterface* _bleMidiInterface;
+//
+//    RemoteCharacteristicCallback(BleMidiInterface* bleMidiInterface) {
+//        _bleMidiInterface = bleMidiInterface;
+//    }
+//
+//
+//    static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+//        Serial.print("Notify callback for characteristic ");
+//        Serial.print(pBLERemoteCharacteristic->getUUID().toString().c_str());
+//        Serial.print(" of data length ");
+//        Serial.println(length);
+//       _bleMidiInterface->receive(pData, length);
+//
+//    }
+//
+//protected:
+//
+//};
+
+/**
+ Scan for BLE servers and find the first one that advertises the service we are looking for.
+ */
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    BleMidiInterface* _bleMidiInterface;
+
+public:
+    MyAdvertisedDeviceCallbacks(BleMidiInterface* bleMidiInterface) {
+        _bleMidiInterface = bleMidiInterface;
+    }
+    /**
+     Called for each advertising BLE server.
+     */
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+        Serial.print("BLE Advertised Device found: ");
+        Serial.println(advertisedDevice.toString().c_str());
+        Serial.println(advertisedDevice.getName().c_str());
+        
+        // We have found a device, let us now see if it contains the service we are looking for.
+        if (advertisedDevice.haveServiceUUID() && advertisedDevice.getServiceUUID().equals(serviceUUID)) {
+            
+            Serial.print("Found our device!  address: ");
+            advertisedDevice.getScan()->stop();
+            
+//            devName = advertisedDevice.getName().c_str();
+//            pServerAddress = new BLEAddress(advertisedDevice.getAddress());
+//            doConnect = true;
+            
+            //        display.drawString(0, 0, "Found BLE MIDI device, connecting...");
+            //        display.display();
+            
+        } // Found our server
+    } // onResult
+}; // MyAdvertisedDeviceCallbacks
+
+
+class MyClientCallbacks: public BLEClientCallbacks {
+public:
+    MyClientCallbacks(BleMidiInterface* bleMidiInterface) {
+        _bleMidiInterface = bleMidiInterface;
+    }
+    
+protected:
+    BleMidiInterface* _bleMidiInterface;
+    void onConnect(BLEClient *pClient) {
+        if (_bleMidiInterface->_connectedCallback)
+            _bleMidiInterface->_connectedCallback();
+    }
+    void onDisconnect(BLEClient *pClient) {
+        if (_bleMidiInterface->_disconnectedCallback)
+            _bleMidiInterface->_disconnectedCallback();
+    }
+  
+};
+
+
+
 bool BleMidiInterface::begin(const char* deviceName)
 {
     BLEDevice::init(deviceName);
@@ -218,6 +321,64 @@ bool BleMidiInterface::begin(const char* deviceName)
     
     return true;
 }
+
+bool BleMidiInterface::beginClient(const char* deviceName, bool startScan)
+{
+    BLEDevice::init(deviceName);
+    
+    if (startScan) {
+        // Retrieve a Scanner and set the callback we want to use to be informed when we
+        // have detected a new device.  Specify that we want active scanning and start the
+        // scan to run for 30 seconds.
+        BLEScan* pBLEScan = BLEDevice::getScan();
+        pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(this));
+        pBLEScan->setActiveScan(true);
+        pBLEScan->start(10);
+    }
+   
+    return true;
+}
+
+ static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+//    Serial.print("Notify callback for characteristic ");
+//    Serial.print(pBLERemoteCharacteristic->getUUID().toString().c_str());
+//    Serial.print(" of data length ");
+//    Serial.println(length);
+     BleMidiInterface::_instance->receive(pData, length);
+
+}
+
+
+
+bool BleMidiInterface::connectClient(BLEAddress pAddress) {
+
+    BLEClient*  pClient  = BLEDevice::createClient();
+    pClient->setClientCallbacks(new MyClientCallbacks(this));
+    pClient->connect(pAddress);
+    
+    // Obtain a reference to the service we are after in the remote BLE server.
+    BLERemoteService* pRemoteService = pClient->getService(serviceUUID);
+    if (pRemoteService == nullptr) {
+             return false;
+    }
+    
+    
+    // Obtain a reference to the characteristic in the service of the remote BLE server.
+    BLERemoteCharacteristic *pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+    if (pRemoteCharacteristic == nullptr) {
+        return false;
+    }
+    
+    // Manually subscribe to notifications
+    const uint8_t notifyOn[] = {0x1, 0x0};
+    pRemoteCharacteristic->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t*)notifyOn, 2, true);
+    
+    // Register the notify callback
+    pRemoteCharacteristic->registerForNotify(notifyCallback);
+
+    return true;
+}
+
 
 void BleMidiInterface::sendMIDI(StatusByte status, DataByte data1, DataByte data2)
 {
